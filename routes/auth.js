@@ -5,6 +5,12 @@ var crypto = require('crypto');
 var db = require('../db');
 
 
+var sb = require('@supabase/supabase-js');
+
+// Create a single supabase client for interacting with your database
+var supabase = sb.createClient(process.env['SUPABASE_URL'], process.env['SUPABASE_KEY']);
+
+
 /* Configure password authentication strategy.
  *
  * The `LocalStrategy` authenticates users by verifying a username and password.
@@ -17,18 +23,19 @@ var db = require('../db');
  * user is authenticated; otherwise, not.
  */
 passport.use(new LocalStrategy(function verify(username, password, cb) {
-  db.get('SELECT rowid AS id, * FROM users WHERE username = ?', [ username ], function(err, row) {
-    if (err) { return cb(err); }
-    if (!row) { return cb(null, false, { message: 'Incorrect username or password.' }); }
-    
-    crypto.pbkdf2(password, row.salt, 310000, 32, 'sha256', function(err, hashedPassword) {
-      if (err) { return cb(err); }
-      if (!crypto.timingSafeEqual(row.hashed_password, hashedPassword)) {
-        return cb(null, false, { message: 'Incorrect username or password.' });
-      }
-      return cb(null, row);
-    });
-  });
+  
+  supabase.auth.signIn({
+    email: username,
+    password: password,
+  }).then(function(response) {
+    var error = response.error;
+    var user = response.user;
+  
+    if (error) { return cb(new Error(error.message)); }
+    return cb(null, user);
+  }).catch(function(error) {
+    return cb(error);
+  })
 }));
 
 /* Configure session management.
@@ -48,7 +55,7 @@ passport.use(new LocalStrategy(function verify(username, password, cb) {
  */
 passport.serializeUser(function(user, cb) {
   process.nextTick(function() {
-    cb(null, { id: user.id, username: user.username });
+    cb(null, { id: user.id, email: user.email });
   });
 });
 
@@ -126,24 +133,24 @@ router.get('/signup', function(req, res, next) {
  * successfully created, the user is logged in.
  */
 router.post('/signup', function(req, res, next) {
-  var salt = crypto.randomBytes(16);
-  crypto.pbkdf2(req.body.password, salt, 310000, 32, 'sha256', function(err, hashedPassword) {
-    if (err) { return next(err); }
-    db.run('INSERT INTO users (username, hashed_password, salt) VALUES (?, ?, ?)', [
-      req.body.username,
-      hashedPassword,
-      salt
-    ], function(err) {
+  supabase.auth.signUp({
+    email: req.body.username,
+    password: req.body.password,
+  }).then(function(response) {
+    // NOTE: Different behavior if "Enable email confirmations" is on or off in Supabase
+    // https://supabase.com/docs/reference/javascript/auth-signup
+    
+    var error = response.error;
+    var user = response.user;
+    
+    if (error) { return next(new Error(error.message)); }
+    
+    req.login(user, function(err) {
       if (err) { return next(err); }
-      var user = {
-        id: this.lastID,
-        username: req.body.username
-      };
-      req.login(user, function(err) {
-        if (err) { return next(err); }
-        res.redirect('/');
-      });
+      res.redirect('/');
     });
+  }).catch(function(error) {
+    return next(error);
   });
 });
 
